@@ -68,14 +68,16 @@ const cv = document.getElementById('game');
 const ctx = cv.getContext('2d');
 const W = 640, H = 800;
 
-// ★ 넓어진 캠퍼스: 건물 6개 (대학본부: 오른쪽 하단)
+// 캠퍼스: 왼쪽 세로 3개 + 오른쪽 세로 3개, 가운데는 큰길
 const buildings = [
+  // 왼쪽 열 (위 → 아래)
   { x:40,  y:70,  w:180, h:130, name:'도서관' },
-  { x:420, y:70,  w:180, h:140, name:'1공학관' },
-  { x:30,  y:330, w:160, h:115, name:'이학관' },
-  { x:245, y:310, w:170, h:125, name:'문과사회대' },
-  { x:470, y:350, w:150, h:110, name:'학생회관' },
-  { x:410, y:590, w:170, h:125, name:'대학본부' },   // ← 오른쪽 하단
+  { x:40,  y:330, w:180, h:125, name:'이학관' },
+  { x:40,  y:590, w:180, h:125, name:'문화사회과학대학' },
+  // 오른쪽 열 (위 → 아래)
+  { x:420, y:70,  w:180, h:130, name:'1공학관' },
+  { x:420, y:330, w:180, h:125, name:'학생회관' },
+  { x:420, y:590, w:180, h:125, name:'대학본부' },
 ];
 
 // 다양한 색의 고양이 (휠캣: 흰 몸 + 치즈색 얼룩!)
@@ -93,11 +95,11 @@ const NEED_DAY_SUCCESS = 3;
 const FEED_GOAL = 3;
 const DAY_CHANCES = 5;
 
-// ★ 경비원 순찰 경로 (경비원마다 다른 구역 담당)
+// 경비원 순찰 경로 (경비원마다 다른 구역 담당)
 const patrolRoutes = [
-  [ {x:320,y:50},  {x:600,y:250}, {x:320,y:250}, {x:40,y:250} ],   // 북쪽 담당
-  [ {x:60,y:480},  {x:320,y:480}, {x:320,y:760}, {x:60,y:600} ],   // 남서 담당
-  [ {x:380,y:480}, {x:380,y:760}, {x:160,y:620}, {x:440,y:300} ],  // 남동 담당
+  [ {x:320,y:50},  {x:600,y:265}, {x:320,y:265}, {x:40,y:265} ],   // 북쪽 가로 골목 담당
+  [ {x:40,y:520},  {x:320,y:520}, {x:320,y:760}, {x:40,y:760} ],   // 남서 담당
+  [ {x:600,y:520}, {x:600,y:760}, {x:320,y:640}, {x:320,y:265} ],  // 남동 + 중앙 큰길 담당
 ];
 
 let state = 'start';
@@ -155,7 +157,8 @@ function makeGuards() {
       x: wp[0].x, y: wp[0].y, r: 14,
       speed: 1.2 + (day - 1) * 0.35,       // 난이도: 더 빨라진다
       vision: 110 + (day - 1) * 8,
-      wp: wp, wi: 0
+      wp: wp, wi: 0,
+      px: wp[0].x, py: wp[0].y, stuck: 0   // ★ 스턱 감지: 직전 위치 + 멈춘 시간
     });
   }
 }
@@ -277,7 +280,20 @@ function update(dt) {
     const gd = Math.hypot(gx, gy);
     const spd = g.speed * (seen ? 1.2 : 1);
     if (gd > 4) moveWithCollision(g, gx / gd * spd, gy / gd * spd);
-    if (!seen && gd < 12) g.wi = (g.wi + 1) % g.wp.length;
+    if (!seen && gd < 12) { g.wi = (g.wi + 1) % g.wp.length; g.stuck = 0; }
+
+    // ★ 스턱 감지: 실제 이동 거리가 의도한 속도에 한참 못 미치면 막힌 것
+    const moved = Math.hypot(g.x - g.px, g.y - g.py);
+    g.px = g.x; g.py = g.y;
+    if (moved < spd * 0.3) {
+      g.stuck += dt;
+      if (g.stuck > 0.6) {                    // 0.6초 이상 막혀 있으면
+        g.wi = (g.wi + 1) % g.wp.length;      // 다음 경유점으로 포기하고 전환
+        g.stuck = 0;
+      }
+    } else {
+      g.stuck = 0;
+    }
   }
 
   const caught = guards.some(g => dist(g, player) < g.r + player.r);
@@ -360,11 +376,16 @@ function drawBuildings() {
     ctx.fillStyle = '#d9b86a'; // 손잡이
     ctx.beginPath(); ctx.arc(dx + doorW - 5, dyr + doorH / 2, 1.8, 0, Math.PI * 2); ctx.fill();
 
-    // 외곽선 + 이름 현판
+    // 외곽선 + 이름 현판 (긴 이름은 글자 크기 자동 축소)
     ctx.strokeStyle = '#55554f'; ctx.lineWidth = 2.5;
     ctx.strokeRect(b.x, b.y, b.w, b.h);
     const label = b.name;
-    ctx.font = 'bold 13px sans-serif';
+    let fs = 13;
+    ctx.font = 'bold ' + fs + 'px sans-serif';
+    while (ctx.measureText(label).width + 14 > b.w - 8 && fs > 9) {
+      fs--;
+      ctx.font = 'bold ' + fs + 'px sans-serif';
+    }
     const tw = ctx.measureText(label).width + 14;
     ctx.fillStyle = '#4a4a46';
     ctx.fillRect(b.x + b.w / 2 - tw / 2, dyr - 20, tw, 17);
