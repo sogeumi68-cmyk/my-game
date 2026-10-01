@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>고양이 밥주기</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    background:#5c2e24; font-family:'Malgun Gothic', sans-serif;
+    display:flex; justify-content:center; align-items:center; min-height:100vh;
+  }
+  #wrap { position:relative; width:100%; max-width:480px; }
+  #hud {
+    display:flex; justify-content:space-between; padding:8px 12px;
+    background:#7a3b2c; color:#ffe9d6; font-size:14px; font-weight:bold;
+    border-radius:8px 8px 0 0; gap:6px;
+  }
+  canvas { display:block; width:100%; background:#c97b5a; touch-action:none; border-radius:0 0 8px 8px; }
+  .overlay {
+    position:absolute; inset:0; background:rgba(60,25,15,0.88);
+    display:flex; flex-direction:column; justify-content:center; align-items:center;
+    color:#ffe9d6; text-align:center; padding:20px; border-radius:8px;
+  }
+  .overlay h1 { font-size:30px; margin-bottom:14px; }
+  .overlay p { font-size:15px; line-height:1.7; margin-bottom:10px; }
+  .overlay button {
+    margin-top:14px; padding:12px 36px; font-size:18px; font-weight:bold;
+    background:#f5a623; color:#4a2415; border:none; border-radius:10px; cursor:pointer;
+  }
+  .overlay button:active { transform:scale(0.96); }
+  .hidden { display:none !important; }
+  #msgScreen h1 { font-size:26px; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="hud">
+    <span id="hudDay">1일차</span>
+    <span id="hudScore">🍚 0/3 · 기회 5</span>
+    <span id="hudTime">⏱ 60</span>
+  </div>
+  <canvas id="game" width="480" height="600"></canvas>
+
+  <div id="startScreen" class="overlay">
+    <h1>🐱 고양이 밥주기</h1>
+    <p>경비원 몰래 학교 고양이들에게<br>매일매일 밥을 주자!</p>
+    <p>하루에 기회는 <b>5번</b>, 그 안에 밥을 <b>3번</b> 주면 하루 성공!<br>
+       👮 경비원에게 걸리면 기회 1번을 잃는다<br>
+       5일 중 <b>3일을 성공</b>하면 게임 끝!<br>
+       날이 갈수록 경비원이 빨라진다…</p>
+    <p>🖐 폰: 화면을 누르고 있으면 그쪽으로 이동<br>
+       ⌨️ PC: 방향키/WASD 또는 마우스 클릭 이동</p>
+    <button id="startBtn">게임 시작</button>
+  </div>
+
+  <div id="msgScreen" class="overlay hidden"><h1 id="msgText"></h1></div>
+
+  <div id="endScreen" class="overlay hidden">
+    <h1 id="endTitle"></h1>
+    <p id="endText"></p>
+    <button id="retryBtn">다시 하기</button>
+  </div>
+</div>
+
+<script>
+const cv = document.getElementById('game');
+const ctx = cv.getContext('2d');
+const W = 480, H = 600;
+
+// 벽돌색 캠퍼스 건물
+const buildings = [
+  { x:40,  y:80,  w:150, h:110, name:'도서관' },
+  { x:290, y:70,  w:150, h:120, name:'공학관' },
+  { x:60,  y:300, w:130, h:100, name:'학생회관' },
+  { x:300, y:320, w:140, h:90,  name:'본관' },
+];
+
+// 다양한 색의 고양이 (휠캣: 흰 몸 + 치즈색 얼룩!)
+const cats = [
+  { name:'치즈냥', color:'#f5a623', patch:null,      wheel:false },
+  { name:'까망냥', color:'#3a3a3a', patch:null,      wheel:false },
+  { name:'휠캣',   color:'#ffffff', patch:'#f5a623', wheel:true  },
+  { name:'회색냥', color:'#9e9e9e', patch:null,      wheel:false },
+  { name:'갈색냥', color:'#a0522d', patch:null,      wheel:false },
+];
+
+const DAY_TIME = 60;        // 하루 제한 시간(초)
+const TOTAL_DAYS = 5;
+const NEED_DAY_SUCCESS = 3; // 3일 성공하면 게임 끝
+const FEED_GOAL = 3;        // 하루에 밥 3번
+const DAY_CHANCES = 5;      // 하루 기회 5번
+
+let state = 'start'; // start | play | msg | end
+let day, daySuccess, feedCount, failCount, timeLeft, lastTime;
+let player, guard, cat;
+let keys = {}, pointer = null;
+let toast = null;
+
+function rectHit(px, py, r, b, pad) {
+  pad = pad || 0;
+  return px + r > b.x - pad && px - r < b.x + b.w + pad &&
+         py + r > b.y - pad && py - r < b.y + b.h + pad;
+}
+function inAnyBuilding(px, py, r) {
+  return buildings.some(b => rectHit(px, py, r, b, 6));
+}
+function moveWithCollision(obj, dx, dy) {
+  let nx = obj.x + dx, ny = obj.y + dy;
+  if (!inAnyBuilding(nx, obj.y, obj.r)) obj.x = nx;
+  if (!inAnyBuilding(obj.x, ny, obj.r)) obj.y = ny;
+  obj.x = Math.max(obj.r, Math.min(W - obj.r, obj.x));
+  obj.y = Math.max(obj.r, Math.min(H - obj.r, obj.y));
+}
+function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
+
+function randomCatPos() {
+  for (let i = 0; i < 200; i++) {
+    const x = 35 + Math.random() * (W - 70);
+    const y = 50 + Math.random() * (H - 100);
+    const p = { x, y };
+    if (!inAnyBuilding(x, y, 20) && dist(p, player) > 160 && dist(p, guard) > 130) return p;
+  }
+  return { x: 240, y: 250 };
+}
+
+// ★ 매번 다른 고양이가 랜덤으로 등장 (직전 고양이와는 겹치지 않게)
+function nextCatInfo() {
+  let pick;
+  do {
+    pick = cats[Math.floor(Math.random() * cats.length)];
+  } while (cat && cat.info && pick === cat.info && cats.length > 1);
+  return pick;
+}
+
+function resetPositions(resetGuard) {
+  player.x = 240; player.y = 565;
+  if (resetGuard) { guard.x = 240; guard.y = 40; guard.wi = 0; }
+  cat.info = nextCatInfo();
+  const pos = randomCatPos();
+  cat.x = pos.x; cat.y = pos.y;
+}
+
+function startDay() {
+  player = { x: 240, y: 565, r: 14, speed: 2.5 };
+  guard = {
+    x: 240, y: 40, r: 14,
+    speed: 1.2 + (day - 1) * 0.4,          // 난이도: 경비원이 더 빨라진다
+    vision: 105 + (day - 1) * 8,
+    wp: [ {x:240,y:45}, {x:430,y:250}, {x:240,y:250}, {x:40,y:250} ],
+    wi: 0
+  };
+  cat = { x: 0, y: 0, r: 17, info: null };
+  resetPositions(false);
+  feedCount = 0; failCount = 0;
+  timeLeft = DAY_TIME;
+  state = 'play';
+  updateHUD();
+}
+
+function updateHUD() {
+  document.getElementById('hudDay').textContent = day + '일차 · 달성 ' + daySuccess + '/' + NEED_DAY_SUCCESS + '일';
+  document.getElementById('hudScore').textContent =
+    '🍚 ' + feedCount + '/' + FEED_GOAL + ' · 기회 ' + (DAY_CHANCES - feedCount - failCount);
+  document.getElementById('hudTime').textContent = '⏱ ' + Math.max(0, Math.ceil(timeLeft));
+}
+
+function showToast(text) {
+  toast = { text, until: Date.now() + 1200 };
+}
+
+function onFeed() {
+  feedCount++;
+  const eaten = cat.info.name;
+  if (feedCount >= FEED_GOAL) return dayResult(true);
+  showToast('😻 ' + eaten + ' 냠냠! 밥 ' + feedCount + '/' + FEED_GOAL);
+  resetPositions(false);
+  updateHUD();
+}
+
+function onCaught() {
+  failCount++;
+  const left = DAY_CHANCES - feedCount - failCount;
+  if (feedCount + left < FEED_GOAL) return dayResult(false, '기회를 다 써 버렸다…');
+  showToast('😿 들켰다! 남은 기회 ' + left);
+  resetPositions(true);
+  updateHUD();
+}
+
+function dayResult(ok, reason) {
+  if (ok) daySuccess++;
+  state = 'msg';
+  const msg = document.getElementById('msgScreen');
+  document.getElementById('msgText').innerHTML = ok
+    ? '😻 ' + day + '일차 성공!<br>고양이들이 배불리 먹었다'
+    : '😿 ' + day + '일차 실패…<br>' + reason;
+  msg.classList.remove('hidden');
+  updateHUD();
+  setTimeout(() => {
+    msg.classList.add('hidden');
+    if (daySuccess >= NEED_DAY_SUCCESS) return endGame(true);
+    if (day >= TOTAL_DAYS) return endGame(false);
+    day++;
+    startDay();
+  }, 1700);
+}
+
+function endGame(win) {
+  state = 'end';
+  document.getElementById('endTitle').textContent = win ? '🎉 게임 끝!' : '게임 오버';
+  document.getElementById('endText').innerHTML = win
+    ? '3일 성공!<br>캠퍼스 고양이들이 배불리 먹었다 🐱🐈‍⬛🐈'
+    : '성공한 날: ' + daySuccess + '일<br>고양이들이 아직 배고프다…';
+  document.getElementById('endScreen').classList.remove('hidden');
+}
+
+function resetGame() {
+  day = 1; daySuccess = 0;
+  document.getElementById('endScreen').classList.add('hidden');
+  startDay();
+}
+
+// ── 조작 ──
+document.addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true; });
+document.addEventListener('keyup',   e => { keys[e.key.toLowerCase()] = false; });
+function toGame(e) {
+  const r = cv.getBoundingClientRect();
+  return { x: (e.clientX - r.left) * (W / r.width), y: (e.clientY - r.top) * (H / r.height) };
+}
+cv.addEventListener('pointerdown', e => { pointer = toGame(e); e.preventDefault(); });
+cv.addEventListener('pointermove', e => { if (pointer) pointer = toGame(e); });
+window.addEventListener('pointerup', () => { pointer = null; });
+
+// ── 업데이트 ──
+function update(dt) {
+  let dx = 0, dy = 0;
+  if (keys['arrowleft'] || keys['a']) dx -= 1;
+  if (keys['arrowright'] || keys['d']) dx += 1;
+  if (keys['arrowup'] || keys['w']) dy -= 1;
+  if (keys['arrowdown'] || keys['s']) dy += 1;
+  if (pointer) {
+    const px = pointer.x - player.x, py = pointer.y - player.y;
+    const d = Math.hypot(px, py);
+    if (d > 6) { dx = px / d; dy = py / d; }
+  } else if (dx || dy) {
+    const d = Math.hypot(dx, dy); dx /= d; dy /= d;
+  }
+  moveWithCollision(player, dx * player.speed, dy * player.speed);
+
+  const seen = dist(guard, player) < guard.vision;
+  let target = seen ? player : guard.wp[guard.wi];
+  const gx = target.x - guard.x, gy = target.y - guard.y;
+  const gd = Math.hypot(gx, gy);
+  const spd = guard.speed * (seen ? 1.2 : 1);
+  if (gd > 4) moveWithCollision(guard, gx / gd * spd, gy / gd * spd);
+  if (!seen && gd < 12) guard.wi = (guard.wi + 1) % guard.wp.length;
+
+  if (dist(guard, player) < guard.r + player.r) { onCaught(); if (state !== 'play') return; }
+  else if (dist(cat, player) < cat.r + player.r + 4) { onFeed(); if (state !== 'play') return; }
+  timeLeft -= dt;
+  if (timeLeft <= 0) return dayResult(false, '시간이 다 지났다…');
+  updateHUD();
+}
+
+// ── 그리기 ──
+function drawBrickGround() {
+  ctx.fillStyle = '#c97b5a';
+  ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = 'rgba(255,230,210,0.25)';
+  ctx.lineWidth = 1;
+  const bh = 24, bw = 48;
+  for (let y = 0; y < H; y += bh) {
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+    const off = (y / bh) % 2 ? bw / 2 : 0;
+    for (let x = off; x < W; x += bw) {
+      ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, y + bh); ctx.stroke();
+    }
+  }
+}
+function drawBuildings() {
+  buildings.forEach(b => {
+    ctx.fillStyle = '#8d3b2f';
+    ctx.fillRect(b.x, b.y, b.w, b.h);
+    ctx.strokeStyle = '#5c2318'; ctx.lineWidth = 3;
+    ctx.strokeRect(b.x, b.y, b.w, b.h);
+    ctx.fillStyle = '#ffdf9e';
+    for (let wy = b.y + 14; wy < b.y + b.h - 18; wy += 26)
+      for (let wx = b.x + 14; wx < b.x + b.w - 20; wx += 30)
+        ctx.fillRect(wx, wy, 14, 12);
+    ctx.fillStyle = '#ffe9d6';
+    ctx.font = 'bold 13px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(b.name, b.x + b.w / 2, b.y + b.h - 12);
+  });
+}
+function drawEmoji(em, x, y, size) {
+  ctx.fillStyle = '#000';
+  ctx.font = size + "px 'Apple Color Emoji','Segoe UI Emoji','Noto Color Emoji',serif";
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(em, x, y);
+}
+
+// ★ 더 귀여운 고양이: 큰 머리, 왕눈이+눈 하이라이트, ω 입, 볼터치, 통통한 몸
+function drawCat() {
+  const c = cat, col = c.info.color;
+  const isWhite = col === '#ffffff';
+  const line = isWhite ? '#c9c2b8' : 'rgba(0,0,0,0.3)';
+  const bob = Math.sin(Date.now() / 300) * 2;   // 살랑살랑 떠 있는 느낌
+  const y0 = c.y + bob;
+
+  // 느낌표 (배고픈 고양이 표시)
+  drawEmoji('❗', c.x, y0 - 50, 18);
+
+  // 휠캣: 바퀴 수레 (몸 아래, 흔들림 없이 바닥 고정)
+  if (c.info.wheel) {
+    ctx.fillStyle = '#7a5230';
+    ctx.fillRect(c.x - 19, c.y + 16, 38, 5);
+    ctx.fillStyle = '#333';
+    ctx.beginPath(); ctx.arc(c.x - 12, c.y + 24, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(c.x + 12, c.y + 24, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#999'; // 바퀴 중심
+    ctx.beginPath(); ctx.arc(c.x - 12, c.y + 24, 1.8, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(c.x + 12, c.y + 24, 1.8, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // 동글 말린 꼬리
+  ctx.strokeStyle = col; ctx.lineWidth = 6; ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(c.x + 13, y0 + 10);
+  ctx.quadraticCurveTo(c.x + 28, y0 + 8, c.x + 25, y0 - 4);
+  ctx.quadraticCurveTo(c.x + 23, y0 - 11, c.x + 18, y0 - 7);
+  ctx.stroke();
+
+  // 통통한 몸통
+  ctx.fillStyle = col;
+  ctx.beginPath(); ctx.ellipse(c.x, y0 + 9, 14, 10, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = line; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.ellipse(c.x, y0 + 9, 14, 10, 0, 0, Math.PI * 2); ctx.stroke();
+
+  // 앞발 (하얀 양말 느낌)
+  ctx.fillStyle = isWhite ? '#f2efe9' : '#fff';
+  ctx.beginPath(); ctx.ellipse(c.x - 6, y0 + 16, 3.5, 2.5, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(c.x + 6, y0 + 16, 3.5, 2.5, 0, 0, Math.PI * 2); ctx.fill();
+
+  // 동그란 귀 + 분홍 안쪽
+  ctx.fillStyle = col;
+  ctx.beginPath(); ctx.moveTo(c.x - 13, y0 - 14); ctx.quadraticCurveTo(c.x - 14, y0 - 28, c.x - 4, y0 - 23); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(c.x + 13, y0 - 14); ctx.quadraticCurveTo(c.x + 14, y0 - 28, c.x + 4, y0 - 23); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#f9b8c4';
+  ctx.beginPath(); ctx.moveTo(c.x - 11, y0 - 16); ctx.quadraticCurveTo(c.x - 12, y0 - 24, c.x - 6, y0 - 21); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(c.x + 11, y0 - 16); ctx.quadraticCurveTo(c.x + 12, y0 - 24, c.x + 6, y0 - 21); ctx.closePath(); ctx.fill();
+
+  // 큰 머리 (가로로 살짝 넓어서 아기 얼굴)
+  ctx.fillStyle = col;
+  ctx.beginPath(); ctx.ellipse(c.x, y0 - 9, 14, 12.5, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = line; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.ellipse(c.x, y0 - 9, 14, 12.5, 0, 0, Math.PI * 2); ctx.stroke();
+
+  // 휠캣: 치즈색 얼룩
+  if (c.info.patch) {
+    ctx.fillStyle = c.info.patch;
+    ctx.beginPath(); ctx.ellipse(c.x - 6, y0 - 17, 6, 4.5, -0.4, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(c.x + 7, y0 + 7, 6, 5, 0.3, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(c.x - 8, y0 + 12, 4, 3, 0, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // 왕눈이 + 하이라이트 (까망냥도 잘 보임)
+  ctx.fillStyle = '#2b2b2b';
+  ctx.beginPath(); ctx.ellipse(c.x - 5.5, y0 - 10, 3.6, 4.2, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(c.x + 5.5, y0 - 10, 3.6, 4.2, 0, 0, Math.PI * 2); ctx.fill();
+  if (col === '#3a3a3a') { // 까망냥은 눈 테두리를 밝게
+    ctx.strokeStyle = '#f2efe9'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.ellipse(c.x - 5.5, y0 - 10, 3.6, 4.2, 0, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.ellipse(c.x + 5.5, y0 - 10, 3.6, 4.2, 0, 0, Math.PI * 2); ctx.stroke();
+  }
+  ctx.fillStyle = '#fff'; // 반짝이 하이라이트
+  ctx.beginPath(); ctx.arc(c.x - 4.3, y0 - 11.5, 1.4, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(c.x + 6.7, y0 - 11.5, 1.4, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(c.x - 6.5, y0 - 8.5, 0.7, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(c.x + 4.5, y0 - 8.5, 0.7, 0, Math.PI * 2); ctx.fill();
+
+  // 분홍 볼터치
+  ctx.fillStyle = 'rgba(249,140,160,0.55)';
+  ctx.beginPath(); ctx.ellipse(c.x - 10, y0 - 5, 3, 2, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(c.x + 10, y0 - 5, 3, 2, 0, 0, Math.PI * 2); ctx.fill();
+
+  // 코 + ω 입
+  ctx.fillStyle = '#f98ca0';
+  ctx.beginPath(); ctx.moveTo(c.x - 1.6, y0 - 6); ctx.lineTo(c.x + 1.6, y0 - 6); ctx.lineTo(c.x, y0 - 4); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = col === '#3a3a3a' ? '#f2efe9' : 'rgba(0,0,0,0.5)';
+  ctx.lineWidth = 1.2; ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(c.x, y0 - 4);
+  ctx.quadraticCurveTo(c.x - 2.5, y0 - 1, c.x - 4.5, y0 - 3);
+  ctx.moveTo(c.x, y0 - 4);
+  ctx.quadraticCurveTo(c.x + 2.5, y0 - 1, c.x + 4.5, y0 - 3);
+  ctx.stroke();
+
+  // 짧은 수염
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(c.x - 13, y0 - 7); ctx.lineTo(c.x - 19, y0 - 8);
+  ctx.moveTo(c.x - 13, y0 - 4); ctx.lineTo(c.x - 19, y0 - 3);
+  ctx.moveTo(c.x + 13, y0 - 7); ctx.lineTo(c.x + 19, y0 - 8);
+  ctx.moveTo(c.x + 13, y0 - 4); ctx.lineTo(c.x + 19, y0 - 3);
+  ctx.stroke();
+
+  // 이름표
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 12px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(c.info.name, c.x, c.y + (c.info.wheel ? 38 : 28));
+}
+
+function drawGuard() {
+  ctx.fillStyle = 'rgba(255,80,60,0.13)';
+  ctx.beginPath(); ctx.arc(guard.x, guard.y, guard.vision, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,80,60,0.4)'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(guard.x, guard.y, guard.vision, 0, Math.PI * 2); ctx.stroke();
+  drawEmoji('👮', guard.x, guard.y, 28);
+}
+function drawPlayer() {
+  drawEmoji('🧑', player.x, player.y, 28);
+  drawEmoji('🥫', player.x + 13, player.y + 8, 14);
+}
+function drawToast() {
+  if (!toast) return;
+  if (Date.now() > toast.until) { toast = null; return; }
+  ctx.fillStyle = 'rgba(40,20,10,0.8)';
+  const w = 240;
+  ctx.fillRect(W / 2 - w / 2, 14, w, 36);
+  ctx.fillStyle = '#ffe9d6';
+  ctx.font = 'bold 15px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(toast.text, W / 2, 32);
+}
+function draw() {
+  drawBrickGround();
+  drawBuildings();
+  if (state === 'play' || state === 'msg') {
+    drawCat();
+    drawGuard();
+    drawPlayer();
+    drawToast();
+  }
+}
+
+// ── 루프 ──
+function loop(t) {
+  const dt = Math.min(0.05, (t - lastTime) / 1000) || 0;
+  lastTime = t;
+  if (state === 'play') update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+document.getElementById('startBtn').addEventListener('click', () => {
+  document.getElementById('startScreen').classList.add('hidden');
+  resetGame();
+});
+document.getElementById('retryBtn').addEventListener('click', resetGame);
+
+draw();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
