@@ -10,7 +10,7 @@
     background:#5c2e24; font-family:'Malgun Gothic', sans-serif;
     display:flex; justify-content:center; align-items:center; min-height:100vh;
   }
-  #wrap { position:relative; width:100%; max-width:480px; }
+  #wrap { position:relative; width:100%; max-width:640px; }
   #hud {
     display:flex; justify-content:space-between; padding:8px 12px;
     background:#7a3b2c; color:#ffe9d6; font-size:14px; font-weight:bold;
@@ -40,7 +40,7 @@
     <span id="hudScore">🍚 0/3 · 기회 5</span>
     <span id="hudTime">⏱ 60</span>
   </div>
-  <canvas id="game" width="480" height="600"></canvas>
+  <canvas id="game" width="640" height="800"></canvas>
 
   <div id="startScreen" class="overlay">
     <h1>🐱 고양이 밥주기</h1>
@@ -48,7 +48,7 @@
     <p>하루에 기회는 <b>5번</b>, 그 안에 밥을 <b>3번</b> 주면 하루 성공!<br>
        👮 경비원에게 걸리면 기회 1번을 잃는다<br>
        5일 중 <b>3일을 성공</b>하면 게임 끝!<br>
-       날이 갈수록 경비원이 빨라진다…</p>
+       날이 갈수록 경비원이 빨라지고 <b>수도 늘어난다</b>…</p>
     <p>🖐 폰: 화면을 누르고 있으면 그쪽으로 이동<br>
        ⌨️ PC: 방향키/WASD 또는 마우스 클릭 이동</p>
     <button id="startBtn">게임 시작</button>
@@ -66,14 +66,16 @@
 <script>
 const cv = document.getElementById('game');
 const ctx = cv.getContext('2d');
-const W = 480, H = 600;
+const W = 640, H = 800;
 
-// 벽돌색 캠퍼스 건물
+// ★ 넓어진 캠퍼스: 건물 6개 (대학본부: 오른쪽 하단)
 const buildings = [
-  { x:40,  y:80,  w:150, h:110, name:'도서관' },
-  { x:290, y:70,  w:150, h:120, name:'공학관' },
-  { x:60,  y:300, w:130, h:100, name:'학생회관' },
-  { x:300, y:320, w:140, h:90,  name:'본관' },
+  { x:40,  y:70,  w:180, h:130, name:'도서관' },
+  { x:420, y:70,  w:180, h:140, name:'1공학관' },
+  { x:30,  y:330, w:160, h:115, name:'이학관' },
+  { x:245, y:310, w:170, h:125, name:'문과사회대' },
+  { x:470, y:350, w:150, h:110, name:'학생회관' },
+  { x:410, y:590, w:170, h:125, name:'대학본부' },   // ← 오른쪽 하단
 ];
 
 // 다양한 색의 고양이 (휠캣: 흰 몸 + 치즈색 얼룩!)
@@ -85,15 +87,22 @@ const cats = [
   { name:'갈색냥', color:'#a0522d', patch:null,      wheel:false },
 ];
 
-const DAY_TIME = 60;        // 하루 제한 시간(초)
+const DAY_TIME = 60;
 const TOTAL_DAYS = 5;
-const NEED_DAY_SUCCESS = 3; // 3일 성공하면 게임 끝
-const FEED_GOAL = 3;        // 하루에 밥 3번
-const DAY_CHANCES = 5;      // 하루 기회 5번
+const NEED_DAY_SUCCESS = 3;
+const FEED_GOAL = 3;
+const DAY_CHANCES = 5;
 
-let state = 'start'; // start | play | msg | end
+// ★ 경비원 순찰 경로 (경비원마다 다른 구역 담당)
+const patrolRoutes = [
+  [ {x:320,y:50},  {x:600,y:250}, {x:320,y:250}, {x:40,y:250} ],   // 북쪽 담당
+  [ {x:60,y:480},  {x:320,y:480}, {x:320,y:760}, {x:60,y:600} ],   // 남서 담당
+  [ {x:380,y:480}, {x:380,y:760}, {x:160,y:620}, {x:440,y:300} ],  // 남동 담당
+];
+
+let state = 'start';
 let day, daySuccess, feedCount, failCount, timeLeft, lastTime;
-let player, guard, cat;
+let player, guards, cat;
 let keys = {}, pointer = null;
 let toast = null;
 
@@ -114,17 +123,21 @@ function moveWithCollision(obj, dx, dy) {
 }
 function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
 
+function guardCountForDay(d) {
+  return Math.min(3, 1 + Math.floor((d - 1) / 2)); // 1~2일차 1명, 3~4일차 2명, 5일차 3명
+}
+
 function randomCatPos() {
-  for (let i = 0; i < 200; i++) {
+  for (let i = 0; i < 300; i++) {
     const x = 35 + Math.random() * (W - 70);
     const y = 50 + Math.random() * (H - 100);
     const p = { x, y };
-    if (!inAnyBuilding(x, y, 20) && dist(p, player) > 160 && dist(p, guard) > 130) return p;
+    if (!inAnyBuilding(x, y, 20) && dist(p, player) > 200 &&
+        guards.every(g => dist(p, g) > 150)) return p;
   }
-  return { x: 240, y: 250 };
+  return { x: 320, y: 500 };
 }
 
-// ★ 매번 다른 고양이가 랜덤으로 등장 (직전 고양이와는 겹치지 않게)
 function nextCatInfo() {
   let pick;
   do {
@@ -133,23 +146,31 @@ function nextCatInfo() {
   return pick;
 }
 
-function resetPositions(resetGuard) {
-  player.x = 240; player.y = 565;
-  if (resetGuard) { guard.x = 240; guard.y = 40; guard.wi = 0; }
+function makeGuards() {
+  const n = guardCountForDay(day);
+  guards = [];
+  for (let i = 0; i < n; i++) {
+    const wp = patrolRoutes[i % patrolRoutes.length];
+    guards.push({
+      x: wp[0].x, y: wp[0].y, r: 14,
+      speed: 1.2 + (day - 1) * 0.35,       // 난이도: 더 빨라진다
+      vision: 110 + (day - 1) * 8,
+      wp: wp, wi: 0
+    });
+  }
+}
+
+function resetPositions(resetGuards) {
+  player.x = 320; player.y = 765;
+  if (resetGuards) makeGuards();
   cat.info = nextCatInfo();
   const pos = randomCatPos();
   cat.x = pos.x; cat.y = pos.y;
 }
 
 function startDay() {
-  player = { x: 240, y: 565, r: 14, speed: 2.5 };
-  guard = {
-    x: 240, y: 40, r: 14,
-    speed: 1.2 + (day - 1) * 0.4,          // 난이도: 경비원이 더 빨라진다
-    vision: 105 + (day - 1) * 8,
-    wp: [ {x:240,y:45}, {x:430,y:250}, {x:240,y:250}, {x:40,y:250} ],
-    wi: 0
-  };
+  player = { x: 320, y: 765, r: 14, speed: 2.7 };
+  makeGuards();
   cat = { x: 0, y: 0, r: 17, info: null };
   resetPositions(false);
   feedCount = 0; failCount = 0;
@@ -159,7 +180,8 @@ function startDay() {
 }
 
 function updateHUD() {
-  document.getElementById('hudDay').textContent = day + '일차 · 달성 ' + daySuccess + '/' + NEED_DAY_SUCCESS + '일';
+  document.getElementById('hudDay').textContent =
+    day + '일차 · 달성 ' + daySuccess + '/' + NEED_DAY_SUCCESS + '일 · 👮×' + guardCountForDay(day);
   document.getElementById('hudScore').textContent =
     '🍚 ' + feedCount + '/' + FEED_GOAL + ' · 기회 ' + (DAY_CHANCES - feedCount - failCount);
   document.getElementById('hudTime').textContent = '⏱ ' + Math.max(0, Math.ceil(timeLeft));
@@ -247,15 +269,19 @@ function update(dt) {
   }
   moveWithCollision(player, dx * player.speed, dy * player.speed);
 
-  const seen = dist(guard, player) < guard.vision;
-  let target = seen ? player : guard.wp[guard.wi];
-  const gx = target.x - guard.x, gy = target.y - guard.y;
-  const gd = Math.hypot(gx, gy);
-  const spd = guard.speed * (seen ? 1.2 : 1);
-  if (gd > 4) moveWithCollision(guard, gx / gd * spd, gy / gd * spd);
-  if (!seen && gd < 12) guard.wi = (guard.wi + 1) % guard.wp.length;
+  // 경비원 여러 명: 각자 순찰하다가 시야에 들어오면 추격
+  for (const g of guards) {
+    const seen = dist(g, player) < g.vision;
+    const target = seen ? player : g.wp[g.wi];
+    const gx = target.x - g.x, gy = target.y - g.y;
+    const gd = Math.hypot(gx, gy);
+    const spd = g.speed * (seen ? 1.2 : 1);
+    if (gd > 4) moveWithCollision(g, gx / gd * spd, gy / gd * spd);
+    if (!seen && gd < 12) g.wi = (g.wi + 1) % g.wp.length;
+  }
 
-  if (dist(guard, player) < guard.r + player.r) { onCaught(); if (state !== 'play') return; }
+  const caught = guards.some(g => dist(g, player) < g.r + player.r);
+  if (caught) { onCaught(); if (state !== 'play') return; }
   else if (dist(cat, player) < cat.r + player.r + 4) { onFeed(); if (state !== 'play') return; }
   timeLeft -= dt;
   if (timeLeft <= 0) return dayResult(false, '시간이 다 지났다…');
@@ -277,22 +303,77 @@ function drawBrickGround() {
     }
   }
 }
+
+// 회색 돌 재질 건물 외관 (돌 블록 + 지붕 + 창문 + 입구)
 function drawBuildings() {
   buildings.forEach(b => {
-    ctx.fillStyle = '#8d3b2f';
+    // 그림자
+    ctx.fillStyle = 'rgba(0,0,0,0.18)';
+    ctx.fillRect(b.x + 5, b.y + 6, b.w, b.h);
+
+    // 돌벽 바탕
+    ctx.fillStyle = '#9a9a98';
     ctx.fillRect(b.x, b.y, b.w, b.h);
-    ctx.strokeStyle = '#5c2318'; ctx.lineWidth = 3;
+
+    // 돌 블록 패턴 (어긋나게 쌓인 돌)
+    const sh = 18, sw = 34;
+    for (let y = b.y, row = 0; y < b.y + b.h; y += sh, row++) {
+      const off = row % 2 ? sw / 2 : 0;
+      for (let x = b.x - off; x < b.x + b.w; x += sw) {
+        const bx = Math.max(x, b.x);
+        const bw2 = Math.min(x + sw, b.x + b.w) - bx - 2;
+        const bh2 = Math.min(sh - 2, b.y + b.h - y);
+        if (bw2 > 0 && bh2 > 0) {
+          const t = ((x * 7 + y * 13) % 5) - 2;
+          ctx.fillStyle = 'rgb(' + (150 + t * 6) + ',' + (150 + t * 6) + ',' + (147 + t * 6) + ')';
+          ctx.fillRect(bx, y, bw2, bh2);
+        }
+      }
+    }
+
+    // 처마(지붕 띠)
+    ctx.fillStyle = '#6e6e6c';
+    ctx.fillRect(b.x - 4, b.y - 6, b.w + 8, 12);
+    ctx.fillStyle = '#5a5a58';
+    ctx.fillRect(b.x - 4, b.y + 4, b.w + 8, 3);
+
+    // 창문 (유리 + 창틀)
+    for (let wy = b.y + 18; wy < b.y + b.h - 40; wy += 30) {
+      for (let wx = b.x + 14; wx < b.x + b.w - 24; wx += 34) {
+        ctx.fillStyle = '#bcd6e4';
+        ctx.fillRect(wx, wy, 18, 14);
+        ctx.strokeStyle = '#55606a'; ctx.lineWidth = 1.5;
+        ctx.strokeRect(wx, wy, 18, 14);
+        ctx.beginPath();
+        ctx.moveTo(wx + 9, wy); ctx.lineTo(wx + 9, wy + 14);
+        ctx.stroke();
+      }
+    }
+
+    // 입구 문 (가운데 아래)
+    const doorW = 22, doorH = 26;
+    const dx = b.x + b.w / 2 - doorW / 2, dyr = b.y + b.h - doorH;
+    ctx.fillStyle = '#4a3828';
+    ctx.fillRect(dx, dyr, doorW, doorH);
+    ctx.strokeStyle = '#2f2318'; ctx.lineWidth = 2;
+    ctx.strokeRect(dx, dyr, doorW, doorH);
+    ctx.fillStyle = '#d9b86a'; // 손잡이
+    ctx.beginPath(); ctx.arc(dx + doorW - 5, dyr + doorH / 2, 1.8, 0, Math.PI * 2); ctx.fill();
+
+    // 외곽선 + 이름 현판
+    ctx.strokeStyle = '#55554f'; ctx.lineWidth = 2.5;
     ctx.strokeRect(b.x, b.y, b.w, b.h);
-    ctx.fillStyle = '#ffdf9e';
-    for (let wy = b.y + 14; wy < b.y + b.h - 18; wy += 26)
-      for (let wx = b.x + 14; wx < b.x + b.w - 20; wx += 30)
-        ctx.fillRect(wx, wy, 14, 12);
-    ctx.fillStyle = '#ffe9d6';
+    const label = b.name;
     ctx.font = 'bold 13px sans-serif';
+    const tw = ctx.measureText(label).width + 14;
+    ctx.fillStyle = '#4a4a46';
+    ctx.fillRect(b.x + b.w / 2 - tw / 2, dyr - 20, tw, 17);
+    ctx.fillStyle = '#ffe9d6';
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText(b.name, b.x + b.w / 2, b.y + b.h - 12);
+    ctx.fillText(label, b.x + b.w / 2, dyr - 11);
   });
 }
+
 function drawEmoji(em, x, y, size) {
   ctx.fillStyle = '#000';
   ctx.font = size + "px 'Apple Color Emoji','Segoe UI Emoji','Noto Color Emoji',serif";
@@ -300,30 +381,27 @@ function drawEmoji(em, x, y, size) {
   ctx.fillText(em, x, y);
 }
 
-// ★ 더 귀여운 고양이: 큰 머리, 왕눈이+눈 하이라이트, ω 입, 볼터치, 통통한 몸
+// 귀여운 고양이: 큰 머리, 왕눈이+하이라이트, ω 입, 볼터치
 function drawCat() {
   const c = cat, col = c.info.color;
   const isWhite = col === '#ffffff';
   const line = isWhite ? '#c9c2b8' : 'rgba(0,0,0,0.3)';
-  const bob = Math.sin(Date.now() / 300) * 2;   // 살랑살랑 떠 있는 느낌
+  const bob = Math.sin(Date.now() / 300) * 2;
   const y0 = c.y + bob;
 
-  // 느낌표 (배고픈 고양이 표시)
   drawEmoji('❗', c.x, y0 - 50, 18);
 
-  // 휠캣: 바퀴 수레 (몸 아래, 흔들림 없이 바닥 고정)
   if (c.info.wheel) {
     ctx.fillStyle = '#7a5230';
     ctx.fillRect(c.x - 19, c.y + 16, 38, 5);
     ctx.fillStyle = '#333';
     ctx.beginPath(); ctx.arc(c.x - 12, c.y + 24, 5, 0, Math.PI * 2); ctx.fill();
     ctx.beginPath(); ctx.arc(c.x + 12, c.y + 24, 5, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#999'; // 바퀴 중심
+    ctx.fillStyle = '#999';
     ctx.beginPath(); ctx.arc(c.x - 12, c.y + 24, 1.8, 0, Math.PI * 2); ctx.fill();
     ctx.beginPath(); ctx.arc(c.x + 12, c.y + 24, 1.8, 0, Math.PI * 2); ctx.fill();
   }
 
-  // 동글 말린 꼬리
   ctx.strokeStyle = col; ctx.lineWidth = 6; ctx.lineCap = 'round';
   ctx.beginPath();
   ctx.moveTo(c.x + 13, y0 + 10);
@@ -331,18 +409,15 @@ function drawCat() {
   ctx.quadraticCurveTo(c.x + 23, y0 - 11, c.x + 18, y0 - 7);
   ctx.stroke();
 
-  // 통통한 몸통
   ctx.fillStyle = col;
   ctx.beginPath(); ctx.ellipse(c.x, y0 + 9, 14, 10, 0, 0, Math.PI * 2); ctx.fill();
   ctx.strokeStyle = line; ctx.lineWidth = 1.5;
   ctx.beginPath(); ctx.ellipse(c.x, y0 + 9, 14, 10, 0, 0, Math.PI * 2); ctx.stroke();
 
-  // 앞발 (하얀 양말 느낌)
   ctx.fillStyle = isWhite ? '#f2efe9' : '#fff';
   ctx.beginPath(); ctx.ellipse(c.x - 6, y0 + 16, 3.5, 2.5, 0, 0, Math.PI * 2); ctx.fill();
   ctx.beginPath(); ctx.ellipse(c.x + 6, y0 + 16, 3.5, 2.5, 0, 0, Math.PI * 2); ctx.fill();
 
-  // 동그란 귀 + 분홍 안쪽
   ctx.fillStyle = col;
   ctx.beginPath(); ctx.moveTo(c.x - 13, y0 - 14); ctx.quadraticCurveTo(c.x - 14, y0 - 28, c.x - 4, y0 - 23); ctx.closePath(); ctx.fill();
   ctx.beginPath(); ctx.moveTo(c.x + 13, y0 - 14); ctx.quadraticCurveTo(c.x + 14, y0 - 28, c.x + 4, y0 - 23); ctx.closePath(); ctx.fill();
@@ -350,13 +425,11 @@ function drawCat() {
   ctx.beginPath(); ctx.moveTo(c.x - 11, y0 - 16); ctx.quadraticCurveTo(c.x - 12, y0 - 24, c.x - 6, y0 - 21); ctx.closePath(); ctx.fill();
   ctx.beginPath(); ctx.moveTo(c.x + 11, y0 - 16); ctx.quadraticCurveTo(c.x + 12, y0 - 24, c.x + 6, y0 - 21); ctx.closePath(); ctx.fill();
 
-  // 큰 머리 (가로로 살짝 넓어서 아기 얼굴)
   ctx.fillStyle = col;
   ctx.beginPath(); ctx.ellipse(c.x, y0 - 9, 14, 12.5, 0, 0, Math.PI * 2); ctx.fill();
   ctx.strokeStyle = line; ctx.lineWidth = 1.5;
   ctx.beginPath(); ctx.ellipse(c.x, y0 - 9, 14, 12.5, 0, 0, Math.PI * 2); ctx.stroke();
 
-  // 휠캣: 치즈색 얼룩
   if (c.info.patch) {
     ctx.fillStyle = c.info.patch;
     ctx.beginPath(); ctx.ellipse(c.x - 6, y0 - 17, 6, 4.5, -0.4, 0, Math.PI * 2); ctx.fill();
@@ -364,27 +437,24 @@ function drawCat() {
     ctx.beginPath(); ctx.ellipse(c.x - 8, y0 + 12, 4, 3, 0, 0, Math.PI * 2); ctx.fill();
   }
 
-  // 왕눈이 + 하이라이트 (까망냥도 잘 보임)
   ctx.fillStyle = '#2b2b2b';
   ctx.beginPath(); ctx.ellipse(c.x - 5.5, y0 - 10, 3.6, 4.2, 0, 0, Math.PI * 2); ctx.fill();
   ctx.beginPath(); ctx.ellipse(c.x + 5.5, y0 - 10, 3.6, 4.2, 0, 0, Math.PI * 2); ctx.fill();
-  if (col === '#3a3a3a') { // 까망냥은 눈 테두리를 밝게
+  if (col === '#3a3a3a') {
     ctx.strokeStyle = '#f2efe9'; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.ellipse(c.x - 5.5, y0 - 10, 3.6, 4.2, 0, 0, Math.PI * 2); ctx.stroke();
     ctx.beginPath(); ctx.ellipse(c.x + 5.5, y0 - 10, 3.6, 4.2, 0, 0, Math.PI * 2); ctx.stroke();
   }
-  ctx.fillStyle = '#fff'; // 반짝이 하이라이트
+  ctx.fillStyle = '#fff';
   ctx.beginPath(); ctx.arc(c.x - 4.3, y0 - 11.5, 1.4, 0, Math.PI * 2); ctx.fill();
   ctx.beginPath(); ctx.arc(c.x + 6.7, y0 - 11.5, 1.4, 0, Math.PI * 2); ctx.fill();
   ctx.beginPath(); ctx.arc(c.x - 6.5, y0 - 8.5, 0.7, 0, Math.PI * 2); ctx.fill();
   ctx.beginPath(); ctx.arc(c.x + 4.5, y0 - 8.5, 0.7, 0, Math.PI * 2); ctx.fill();
 
-  // 분홍 볼터치
   ctx.fillStyle = 'rgba(249,140,160,0.55)';
   ctx.beginPath(); ctx.ellipse(c.x - 10, y0 - 5, 3, 2, 0, 0, Math.PI * 2); ctx.fill();
   ctx.beginPath(); ctx.ellipse(c.x + 10, y0 - 5, 3, 2, 0, 0, Math.PI * 2); ctx.fill();
 
-  // 코 + ω 입
   ctx.fillStyle = '#f98ca0';
   ctx.beginPath(); ctx.moveTo(c.x - 1.6, y0 - 6); ctx.lineTo(c.x + 1.6, y0 - 6); ctx.lineTo(c.x, y0 - 4); ctx.closePath(); ctx.fill();
   ctx.strokeStyle = col === '#3a3a3a' ? '#f2efe9' : 'rgba(0,0,0,0.5)';
@@ -396,7 +466,6 @@ function drawCat() {
   ctx.quadraticCurveTo(c.x + 2.5, y0 - 1, c.x + 4.5, y0 - 3);
   ctx.stroke();
 
-  // 짧은 수염
   ctx.lineWidth = 1;
   ctx.beginPath();
   ctx.moveTo(c.x - 13, y0 - 7); ctx.lineTo(c.x - 19, y0 - 8);
@@ -405,19 +474,20 @@ function drawCat() {
   ctx.moveTo(c.x + 13, y0 - 4); ctx.lineTo(c.x + 19, y0 - 3);
   ctx.stroke();
 
-  // 이름표
   ctx.fillStyle = '#fff';
   ctx.font = 'bold 12px sans-serif';
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   ctx.fillText(c.info.name, c.x, c.y + (c.info.wheel ? 38 : 28));
 }
 
-function drawGuard() {
-  ctx.fillStyle = 'rgba(255,80,60,0.13)';
-  ctx.beginPath(); ctx.arc(guard.x, guard.y, guard.vision, 0, Math.PI * 2); ctx.fill();
-  ctx.strokeStyle = 'rgba(255,80,60,0.4)'; ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.arc(guard.x, guard.y, guard.vision, 0, Math.PI * 2); ctx.stroke();
-  drawEmoji('👮', guard.x, guard.y, 28);
+function drawGuards() {
+  for (const g of guards) {
+    ctx.fillStyle = 'rgba(255,80,60,0.13)';
+    ctx.beginPath(); ctx.arc(g.x, g.y, g.vision, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,80,60,0.4)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(g.x, g.y, g.vision, 0, Math.PI * 2); ctx.stroke();
+    drawEmoji('👮', g.x, g.y, 28);
+  }
 }
 function drawPlayer() {
   drawEmoji('🧑', player.x, player.y, 28);
@@ -427,19 +497,19 @@ function drawToast() {
   if (!toast) return;
   if (Date.now() > toast.until) { toast = null; return; }
   ctx.fillStyle = 'rgba(40,20,10,0.8)';
-  const w = 240;
-  ctx.fillRect(W / 2 - w / 2, 14, w, 36);
+  const w = 260;
+  ctx.fillRect(W / 2 - w / 2, 14, w, 38);
   ctx.fillStyle = '#ffe9d6';
-  ctx.font = 'bold 15px sans-serif';
+  ctx.font = 'bold 16px sans-serif';
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillText(toast.text, W / 2, 32);
+  ctx.fillText(toast.text, W / 2, 33);
 }
 function draw() {
   drawBrickGround();
   drawBuildings();
   if (state === 'play' || state === 'msg') {
     drawCat();
-    drawGuard();
+    drawGuards();
     drawPlayer();
     drawToast();
   }
